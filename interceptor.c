@@ -449,33 +449,42 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 			return 0;
 		case REQUEST_STOP_MONITORING:
 
-			// Dont need to check for permissions
-			spin_lock(&my_table_lock);
+	        spin_lock(&my_table_lock);
+	        
+	        // if pid is 0, check if user is root
+	        if (pid == 0) {
+	            if (current_uid() == 0) {           // user is root
+	                table[syscall].monitored = 0;
+	                destroy_list(syscall);
+	                spin_unlock(&my_table_lock);
+	                return 0;
+	            } else {                            // user is not root
+	                spin_unlock(&my_table_lock);
+	                return -EPERM;
+	            }
+	        }
+	        
+	        // check that the requested pid is owned by calling process
+	        if (check_pids_same_owner(current->pid, pid) != 0) {
+	            spin_unlock(&my_table_lock);
+	            return -EPERM;
+	        }
 
-			if (pid == 0) { //only check for root when the pid is 0.
-					if (current_uid() == 0) { //root check
-							table[syscall].monitored = 0;
-							destroy_list(syscall); //destory the list of system calls.
-							spin_unlock(&my_table_lock);
-							return 0;
-					}else { //when the user is not root.
-							spin_unlock(&my_table_lock);
-							return -EPERM; /* Invalid argument */
-					}
-			}else if (table[syscall].monitored == 0  || table[syscall].intercepted == 0 || table[syscall].monitored == 2) {
-					spin_unlock(&my_table_lock);
-					return -EINVAL; /* Invalid argument */
-			}else if (check_pids_same_owner(current->pid,pid) != 0) { //error checking
-					spin_unlock(&my_table_lock);
-					return -EPERM; /* Invalid argument */
-			}
+	        // check syscall monitored and intercept statuses
+	        if (table[syscall].monitored == 0 || table[syscall].monitored == 2 || \
+	        table[syscall].intercepted == 0) {
+	            spin_unlock(&my_table_lock);
+	            return -EINVAL;
+	        }
 
-			del_pid_sysc(pid, syscall);
-			if (table[syscall].listcount == 0){
-					table[syscall].monitored = 0;
-			}
-			spin_unlock(&my_table_lock);
-			return 0;
+	        // delete pid from syscall's monitored list
+	        // update monitored status if necessary
+	        del_pid_sysc(pid, syscall);
+	        if (table[syscall].listcount == 0)
+	            table[syscall].monitored = 0;
+
+	        spin_unlock(&my_table_lock);
+	        return 0;
 		default:
 			return -EINVAL;
 	}
