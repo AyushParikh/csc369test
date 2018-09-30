@@ -576,10 +576,37 @@ static int init_function(void) {
 static void exit_function(void)
 {
 
-	lock_and_setWR(); // Lock and set to Write/Read
-	sys_call_table[MY_CUSTOM_SYSCALL] = orig_custom_syscall; // Restore to orginal syscall
-	sys_call_table[__NR_exit_group] = orig_exit_group; // Restore to original syscall
-	unlock_and_setR(); // Unlock and set to Read only
+    int i = 0;  // need to declare here due to C90 compiler warnings
+
+    // set sys_call_table to writable, obtain locks
+    spin_lock(&sys_call_table_lock);
+    spin_lock(&my_table_lock);
+    set_addr_rw((unsigned long) sys_call_table);
+
+    // restore MY_CUSTOM_SYSCALL to original syscall
+    sys_call_table[MY_CUSTOM_SYSCALL] = orig_custom_syscall;
+
+    // restore __NR_exit_group to original syscall
+    sys_call_table[__NR_exit_group] = orig_exit_group;
+    
+    // destroy lists, restore original syscalls
+    for (i = 0; i < NR_syscalls; i++) {
+        if (table[i].f != NULL) {
+            sys_call_table[i] = table[i].f;
+            table[i].f = NULL;
+        }
+        table[i].intercepted = 0;
+        table[i].monitored = 0;
+        table[i].listcount = 0;
+        destroy_list(i);
+    }
+
+    // set sys_call_table to read-only, release locks
+    set_addr_ro((unsigned long) sys_call_table);
+    spin_unlock(&sys_call_table_lock);
+    spin_unlock(&my_table_lock);
+    
+    printk("Removing interceptor module\n");
 }
 
 module_init(init_function);
