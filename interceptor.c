@@ -383,22 +383,31 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 
 	switch (cmd) {
 		case REQUEST_SYSCALL_INTERCEPT:
-			// Checking caller permissions
-			if (current_uid() != 0){
-				return -EPERM;
-			}
-			if (table[syscall].intercepted == 1){
-				return -EBUSY; // Intercepting a call that is already being intercepted
-			}
-			lock_and_setWR(); // Lock and set to Write/Read
+	        // check permissions (must be root)
+	        if (current_uid() != 0)
+	            return -EPERM;
+	        
+	        spin_lock(&my_table_lock);
+	        
+	        // check intercept status
+	        if (table[syscall].intercepted == 1) {
+	            spin_unlock(&my_table_lock);
+	            return -EBUSY;
+	        }
 
-			table[syscall].intercepted = 1; // Change state to being intercepted
-			table[syscall].f = sys_call_table[syscall]; // Save original syscall
-			sys_call_table[syscall] = interceptor; // Hijack the syscall with interceptor
+	        // set sys_call_table to writable
+	        set_addr_rw((unsigned long) sys_call_table);
+	        spin_lock(&sys_call_table_lock);
+	        
+	        // hijack syscall with interceptor, save original
+	        table[syscall].f = sys_call_table[syscall];
+	        table[syscall].intercepted = 1;
+	        sys_call_table[syscall] = interceptor;
 
-			unlock_and_setR(); // Unlock and set to Read only
-
-			return 0;
+	        // set sys_call_table to read-only, release table lock
+	        spin_unlock(&my_table_lock);
+	        spin_unlock(&sys_call_table_lock);
+	        set_addr_ro((unsigned long) sys_call_table);
 		case REQUEST_SYSCALL_RELEASE:
 
 			// Checking caller permissions
