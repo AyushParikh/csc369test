@@ -296,13 +296,23 @@ asmlinkage long my_exit_group(struct pt_regs reg)
  */
 asmlinkage long interceptor(struct pt_regs reg) {
 
-	spin_lock(&my_table_lock); //grab table lock so no one else can access
+    asmlinkage long (*orig_syscall)(struct pt_regs) = NULL;
 
-	if ((check_pid_monitored(reg.ax, current->pid) == 1) || (table[reg.ax].monitored == 2)){ //two different ways to check if the pids are being monitored. We check them both.
-		log_message(current->pid, reg.ax, reg.bx, reg.cx, reg.dx, reg.si, reg.di, reg.bp); //log the message using "log_message" as described in the instructions, and in the header file.
-	}
-	spin_unlock(&my_table_lock); //release lock.
-	return table[reg.ax].f(reg); //LAST STEP: CALL ORIGINAL SYSTEM CALL; allow processes to run as normal.  Calling with register information.
+    spin_lock(&my_table_lock);
+
+    // if pid is being monitored, log the system call parameters
+    if (table[reg.ax].monitored == 2 || \
+    check_pid_monitored(reg.ax, current->pid)) {
+        log_message(current->pid, reg.ax, reg.bx, reg.cx,
+            reg.dx, reg.si, reg.di, reg.bp)
+    }
+
+    // get original system call function
+    orig_syscall = table[reg.ax].f;
+    
+    spin_unlock(&my_table_lock);
+    // execute original system call
+    return orig_syscall(reg);
 
 	//return 0; // Just a placeholder, so it compiles with no warnings!
 }
