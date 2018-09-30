@@ -410,23 +410,33 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 	        set_addr_ro((unsigned long) sys_call_table);
 		case REQUEST_SYSCALL_RELEASE:
 
-			// Checking caller permissions
-			if (current_uid() != 0){
-				return -EPERM;
-			}
-			if (table[syscall].intercepted == 0){
-				return -EINVAL; // Releasing a call that is already released
-			}
-			lock_and_setWR(); // Lock and set to Write/Read
+	        // check permissions (must be root)
+	        if (current_uid() != 0)
+	            return -EPERM;
 
-			sys_call_table[syscall] = table[syscall].f; // Set to original
-			// Clean the table
-			table[syscall].intercepted = 0; // Change state to being released
-			destroy_list(syscall); // Cleans rest of the fields
+	        spin_lock(&sys_call_table_lock);
+	        spin_lock(&my_table_lock);
+	        
+	        // check intercept status
+	        if (table[syscall].intercepted == 0) {
+	            spin_unlock(&sys_call_table_lock);
+	            spin_unlock(&my_table_lock);
+	            return -EINVAL;
+	        }
 
-			unlock_and_setR(); // Unlock and set to Read only
+	        // set sys_call_table to writable
+	        set_addr_rw((unsigned long) sys_call_table);
 
-			return 0;
+	        // wipe pid list for syscall, restore syscall with original
+	        if (table[syscall].listcount > 0)
+	            destroy_list(syscall);
+	        sys_call_table[syscall] = table[syscall].f;
+	        table[syscall].intercepted = 0;
+
+	        // set sys_call_table to read-only, release table and list locks
+	        spin_unlock(&sys_call_table_lock);
+	        spin_unlock(&my_table_lock);
+	        set_addr_ro((unsigned long) sys_call_table);
 
 		case REQUEST_START_MONITORING:
 
