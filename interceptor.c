@@ -296,23 +296,13 @@ asmlinkage long my_exit_group(struct pt_regs reg)
  */
 asmlinkage long interceptor(struct pt_regs reg) {
 
-    asmlinkage long (*orig_syscall)(struct pt_regs) = NULL;
+	spin_lock(&my_table_lock); //grab table lock so no one else can access
 
-    spin_lock(&my_table_lock);
-
-    // if pid is being monitored, log the system call parameters
-    if (table[reg.ax].monitored == 2 || \
-    check_pid_monitored(reg.ax, current->pid)) {
-        log_message(current->pid, reg.ax, reg.bx, reg.cx,
-            reg.dx, reg.si, reg.di, reg.bp)
-    }
-
-    // get original system call function
-    orig_syscall = table[reg.ax].f;
-    
-    spin_unlock(&my_table_lock);
-    // execute original system call
-    return orig_syscall(reg);
+	if ((check_pid_monitored(reg.ax, current->pid) == 1) || (table[reg.ax].monitored == 2)){ //two different ways to check if the pids are being monitored. We check them both.
+		log_message(current->pid, reg.ax, reg.bx, reg.cx, reg.dx, reg.si, reg.di, reg.bp); //log the message using "log_message" as described in the instructions, and in the header file.
+	}
+	spin_unlock(&my_table_lock); //release lock.
+	return table[reg.ax].f(reg); //LAST STEP: CALL ORIGINAL SYSTEM CALL; allow processes to run as normal.  Calling with register information.
 
 	//return 0; // Just a placeholder, so it compiles with no warnings!
 }
@@ -383,60 +373,41 @@ asmlinkage long my_syscall(int cmd, int syscall, int pid) {
 
 	switch (cmd) {
 		case REQUEST_SYSCALL_INTERCEPT:
-	        // check permissions (must be root)
-	        if (current_uid() != 0)
-	            return -EPERM;
-	        
-	        spin_lock(&my_table_lock);
-	        
-	        // check intercept status
-	        if (table[syscall].intercepted == 1) {
-	            spin_unlock(&my_table_lock);
-	            return -EBUSY;
-	        }
+			// Checking caller permissions
+			if (current_uid() != 0){
+				return -EPERM;
+			}
+			if (table[syscall].intercepted == 1){
+				return -EBUSY; // Intercepting a call that is already being intercepted
+			}
+			lock_and_setWR(); // Lock and set to Write/Read
 
-	        // set sys_call_table to writable
-	        set_addr_rw((unsigned long) sys_call_table);
-	        spin_lock(&sys_call_table_lock);
-	        
-	        // hijack syscall with interceptor, save original
-	        table[syscall].f = sys_call_table[syscall];
-	        table[syscall].intercepted = 1;
-	        sys_call_table[syscall] = interceptor;
+			table[syscall].intercepted = 1; // Change state to being intercepted
+			table[syscall].f = sys_call_table[syscall]; // Save original syscall
+			sys_call_table[syscall] = interceptor; // Hijack the syscall with interceptor
 
-	        // set sys_call_table to read-only, release table lock
-	        spin_unlock(&my_table_lock);
-	        spin_unlock(&sys_call_table_lock);
-	        set_addr_ro((unsigned long) sys_call_table);
+			unlock_and_setR(); // Unlock and set to Read only
+
+			return 0;
 		case REQUEST_SYSCALL_RELEASE:
 
-	        // check permissions (must be root)
-	        if (current_uid() != 0)
-	            return -EPERM;
+			// Checking caller permissions
+			if (current_uid() != 0){
+				return -EPERM;
+			}
+			if (table[syscall].intercepted == 0){
+				return -EINVAL; // Releasing a call that is already released
+			}
+			lock_and_setWR(); // Lock and set to Write/Read
 
-	        spin_lock(&sys_call_table_lock);
-	        spin_lock(&my_table_lock);
-	        
-	        // check intercept status
-	        if (table[syscall].intercepted == 0) {
-	            spin_unlock(&sys_call_table_lock);
-	            spin_unlock(&my_table_lock);
-	            return -EINVAL;
-	        }
+			sys_call_table[syscall] = table[syscall].f; // Set to original
+			// Clean the table
+			table[syscall].intercepted = 0; // Change state to being released
+			destroy_list(syscall); // Cleans rest of the fields
 
-	        // set sys_call_table to writable
-	        set_addr_rw((unsigned long) sys_call_table);
+			unlock_and_setR(); // Unlock and set to Read only
 
-	        // wipe pid list for syscall, restore syscall with original
-	        if (table[syscall].listcount > 0)
-	            destroy_list(syscall);
-	        sys_call_table[syscall] = table[syscall].f;
-	        table[syscall].intercepted = 0;
-
-	        // set sys_call_table to read-only, release table and list locks
-	        spin_unlock(&sys_call_table_lock);
-	        spin_unlock(&my_table_lock);
-	        set_addr_ro((unsigned long) sys_call_table);
+			return 0;
 
 		case REQUEST_START_MONITORING:
 
@@ -576,37 +547,10 @@ static int init_function(void) {
 static void exit_function(void)
 {
 
-    int i = 0;  // need to declare here due to C90 compiler warnings
-
-    // set sys_call_table to writable, obtain locks
-    spin_lock(&sys_call_table_lock);
-    spin_lock(&my_table_lock);
-    set_addr_rw((unsigned long) sys_call_table);
-
-    // restore MY_CUSTOM_SYSCALL to original syscall
-    sys_call_table[MY_CUSTOM_SYSCALL] = orig_custom_syscall;
-
-    // restore __NR_exit_group to original syscall
-    sys_call_table[__NR_exit_group] = orig_exit_group;
-    
-    // destroy lists, restore original syscalls
-    for (i = 0; i < NR_syscalls; i++) {
-        if (table[i].f != NULL) {
-            sys_call_table[i] = table[i].f;
-            table[i].f = NULL;
-        }
-        table[i].intercepted = 0;
-        table[i].monitored = 0;
-        table[i].listcount = 0;
-        destroy_list(i);
-    }
-
-    // set sys_call_table to read-only, release locks
-    set_addr_ro((unsigned long) sys_call_table);
-    spin_unlock(&sys_call_table_lock);
-    spin_unlock(&my_table_lock);
-    
-    printk("Removing interceptor module\n");
+	lock_and_setWR(); // Lock and set to Write/Read
+	sys_call_table[MY_CUSTOM_SYSCALL] = orig_custom_syscall; // Restore to orginal syscall
+	sys_call_table[__NR_exit_group] = orig_exit_group; // Restore to original syscall
+	unlock_and_setR(); // Unlock and set to Read only
 }
 
 module_init(init_function);
